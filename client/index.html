@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Couchbase Live Feed</title>
+  <style>
+    :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#6b7280; --border:#e3e6eb;
+            --ok:#16a34a; --warn:#d97706; --err:#dc2626; --flash:#fff7cc; --accent:#ea2328; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+    header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;
+             padding:14px 16px; background:var(--card); border-bottom:3px solid var(--accent); }
+    h1 { font-size:18px; margin:0; }
+    .status { display:inline-flex; align-items:center; gap:6px; font-weight:600; }
+    .dot { width:10px; height:10px; border-radius:50%; background:var(--warn); }
+    .status.open .dot { background:var(--ok); }
+    .status.closed .dot { background:var(--err); }
+    form { display:flex; gap:6px; }
+    input, button { font:inherit; padding:6px 10px; border:1px solid var(--border); border-radius:6px; }
+    button { background:var(--text); color:#fff; cursor:pointer; }
+    main { display:grid; grid-template-columns: 2fr 1fr; gap:16px; padding:16px; }
+    @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+    section { background:var(--card); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+    section h2 { font-size:14px; margin:0; padding:10px 12px; border-bottom:1px solid var(--border); }
+    table { width:100%; border-collapse:collapse; }
+    th, td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--border); vertical-align:top; }
+    th { color:var(--muted); font-weight:600; font-size:12px; }
+    td.id { font-family:ui-monospace, monospace; white-space:nowrap; }
+    pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px; }
+    tr.flash { animation: flash 1.2s ease-out; }
+    @keyframes flash { from { background:var(--flash); } to { background:transparent; } }
+    .empty { padding:16px 12px; color:var(--muted); }
+    #log { list-style:none; margin:0; padding:0; max-height:70vh; overflow:auto; font-size:12px; }
+    #log li { padding:6px 12px; border-bottom:1px solid var(--border); }
+    .tag { display:inline-block; min-width:74px; font-weight:600; }
+    .mutation { color:var(--ok); } .deletion, .expiration { color:var(--err); } .info { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Couchbase → SSE live feed</h1>
+    <span id="status" class="status"><span class="dot"></span><span id="status-text">Connexion…</span></span>
+    <form id="filter">
+      <input id="prefix" placeholder="Filtre préfixe de clé (ex. order::)">
+      <button>Appliquer</button>
+    </form>
+  </header>
+
+  <main>
+    <section>
+      <h2>Documents (état courant)</h2>
+      <table>
+        <thead><tr><th>Clé</th><th>Contenu</th><th>Maj</th></tr></thead>
+        <tbody id="docs"></tbody>
+      </table>
+      <div id="empty" class="empty">En attente d'événements…</div>
+    </section>
+    <section>
+      <h2>Journal des événements</h2>
+      <ul id="log"></ul>
+    </section>
+  </main>
+
+  <script>
+    // URL du relais SSE. Même origine par défaut ; ?server=https://api.monapp.com pour un autre domaine.
+    const params = new URLSearchParams(location.search);
+    const SERVER = params.get("server") ?? "";
+
+    const $docs = document.getElementById("docs");
+    const $empty = document.getElementById("empty");
+    const $log = document.getElementById("log");
+    const $status = document.getElementById("status");
+    const $statusText = document.getElementById("status-text");
+    const $prefix = document.getElementById("prefix");
+
+    /** @type {Map<string, HTMLTableRowElement>} */
+    const rows = new Map();
+    /** Dernier CAS vu par document : avec les relances Eventing, un événement plus ancien peut arriver en retard. */
+    const lastCas = new Map();
+    let source = null;
+
+    /** true si l'événement est plus récent que ce qu'on a déjà appliqué pour ce document. */
+    function isFresh({ docId, cas }) {
+      if (cas == null) return true;
+      const incoming = BigInt(cas);
+      const known = lastCas.get(docId);
+      if (known !== undefined && incoming <= known) return false;
+      lastCas.set(docId, incoming);
+      return true;
+    }
+
+    function connect(prefix) {
+      if (source) source.close();
+
+      const url = new URL(SERVER + "/events", location.href);
+      if (prefix) url.searchParams.set("prefix", prefix);
+
+      // EventSource gère seul la reconnexion et renvoie Last-Event-ID : le serveur rejoue les événements manqués.
+      source = new EventSource(url, { withCredentials: !!SERVER });
+
+      source.onopen = () => setStatus("open", "Connecté");
+      source.onerror = () => {
+        // readyState CONNECTING = reconnexion automatique en cours ; CLOSED = abandon (ex. 4xx/5xx).
+        if (source.readyState === EventSource.CLOSED) setStatus("closed", "Déconnecté");
+        else setStatus("", "Reconnexion…");
+      };
+
+      source.addEventListener("mutation", (e) => {
+        const data = JSON.parse(e.data);
+        const fresh = isFresh(data);
+        if (fresh) upsertRow(data);
+        addLog("mutation", data, e.lastEventId, fresh);
+      });
+
+      const onRemove = (e) => {
+        const data = JSON.parse(e.data);
+        const fresh = isFresh(data);
+        if (fresh) removeRow(data.docId);
+        addLog(e.type, data, e.lastEventId, fresh);
+      };
+      source.addEventListener("deletion", onRemove);
+      source.addEventListener("expiration", onRemove);
+    }
+
+    function upsertRow({ docId, doc, receivedAt }) {
+      let tr = rows.get(docId);
+      if (!tr) {
+        tr = document.createElement("tr");
+        tr.innerHTML = '<td class="id"></td><td><pre></pre></td><td class="ts"></td>';
+        tr.querySelector(".id").textContent = docId;
+        $docs.prepend(tr);
+        rows.set(docId, tr);
+      }
+      tr.querySelector("pre").textContent = JSON.stringify(doc, null, 2);
+      tr.querySelector(".ts").textContent = new Date(receivedAt).toLocaleTimeString();
+      tr.classList.remove("flash"); void tr.offsetWidth; tr.classList.add("flash");
+      $empty.hidden = true;
+    }
+
+    function removeRow(docId) {
+      rows.get(docId)?.remove();
+      rows.delete(docId);
+      $empty.hidden = rows.size > 0;
+    }
+
+    function addLog(type, { docId, attempt }, eventId, fresh) {
+      const li = document.createElement("li");
+      const tag = document.createElement("span");
+      tag.className = "tag " + type;
+      tag.textContent = type;
+      const details = [`#${eventId}`, new Date().toLocaleTimeString()];
+      if (attempt > 1) details.push(`tentative ${attempt}`);
+      if (!fresh) details.push("ignoré (version obsolète)");
+      li.append(tag, ` ${docId ?? ""} `, Object.assign(document.createElement("span"),
+        { className: "info", textContent: details.join(" · ") }));
+      $log.prepend(li);
+      while ($log.children.length > 200) $log.lastChild.remove();
+    }
+
+    function setStatus(cls, text) {
+      $status.className = "status " + cls;
+      $statusText.textContent = text;
+    }
+
+    document.getElementById("filter").addEventListener("submit", (e) => {
+      e.preventDefault();
+      rows.forEach((tr) => tr.remove());
+      rows.clear();
+      lastCas.clear();
+      $empty.hidden = false;
+      connect($prefix.value.trim());
+    });
+
+    connect("");
+  </script>
+</body>
+</html>

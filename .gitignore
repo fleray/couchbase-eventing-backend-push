@@ -1,0 +1,47 @@
+# --- Secrets & local overrides -------------------------------------------------
+# Docker Compose reads .env automatically (HOOK_TOKEN, CB_PASSWORD, ports...).
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+compose.override.yml
+
+# --- Node.js (server/) ---------------------------------------------------------
+# package-lock.json is committed: server/Dockerfile runs `npm ci`.
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+
+# --- Python (app/, init/) ------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Couchbase ------------------------------------------------------------------
+# The cluster lives in a Docker volume and is rebuilt by init/setup.py;
+# ignore exports or local bind mounts if someone adds them.
+cb-data/
+*.cbbackup/
+eventing/*.export.json
+
+# --- Logs & temp -----------------------------------------------------------------
+logs/
+*.log
+tmp/
+
+# --- OS / editors ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- Claude Code local settings ----------------------------------------------------
+.claude/settings.local.json

@@ -1,0 +1,77 @@
+# Démo complète : Couchbase (Eventing) -> backend Node.js (SSE) -> navigateur
+#
+#   docker compose up --build
+#   Front      : http://localhost:3000
+#   Couchbase  : http://localhost:8091  (Administrator / password)
+#
+# Ports hôte modifiables en cas de conflit : CB_UI_PORT=18091 BACKEND_PORT=13000 docker compose up --build
+
+name: cb-eventing-demo
+
+x-couchbase-env: &couchbase-env
+  CB_HOST: couchbase
+  CB_USERNAME: ${CB_USERNAME:-Administrator}
+  CB_PASSWORD: ${CB_PASSWORD:-password}
+  CB_BUCKET: ${CB_BUCKET:-demo_event}
+  CB_SCOPE: ${CB_SCOPE:-app}
+  CB_COLLECTION: ${CB_COLLECTION:-agent_event}
+
+services:
+  couchbase:
+    # Enterprise Edition obligatoire : Eventing n'existe pas en Community Edition.
+    image: couchbase/server:${CB_VERSION:-8.0.2}   # les tags sans suffixe sont des Enterprise
+    ports:
+      - "${CB_UI_PORT:-8091}:8091"   # console web ; les autres ports restent internes au réseau Compose
+    healthcheck:
+      test: ["CMD", "/opt/couchbase/bin/curl", "-fs", "-o", "/dev/null", "http://localhost:8091/ui/index.html"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+  # Conteneur éphémère : initialise le cluster, crée bucket / scopes / collections,
+  # puis déploie la fonction Eventing à partir de eventing/push_to_backend.js.
+  couchbase-init:
+    image: python:3.12-slim
+    command: ["python", "-u", "/init/setup.py"]
+    environment:
+      <<: *couchbase-env
+      EVENTING_FUNCTION_FILE: /eventing/push_to_backend.js
+      BACKEND_URL: http://backend:3000
+      HOOK_TOKEN: ${HOOK_TOKEN:-demo-secret}
+    volumes:
+      - ./init:/init:ro
+      - ./eventing:/eventing:ro
+    depends_on:
+      couchbase:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      HOOK_TOKEN: ${HOOK_TOKEN:-demo-secret}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: ./app
+    environment:
+      <<: *couchbase-env
+      MIN_DELAY_SEC: ${MIN_DELAY_SEC:-1}
+      MAX_DELAY_SEC: ${MAX_DELAY_SEC:-5}
+      UPDATE_PROBABILITY: ${UPDATE_PROBABILITY:-0.3}
+      DELETE_PROBABILITY: ${DELETE_PROBABILITY:-0.1}
+    depends_on:
+      couchbase-init:
+        condition: service_completed_successfully
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

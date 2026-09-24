@@ -1,0 +1,18 @@
+{
+  "name": "couchbase-eventing-sse-relay",
+  "version": "1.0.0",
+  "description": "Relais Couchbase Eventing (cURL) -> Server-Sent Events vers le navigateur",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "simulate": "node simulate-eventing.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
